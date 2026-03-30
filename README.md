@@ -38,13 +38,14 @@ This prints deterministic test values:
 ### Auth
 
 - `POST /api/auth/login`
+- `POST /api/auth/register`
 - `GET /api/auth/me`
 
 Login request:
 
 ```json
 {
-  "username": "admin_medtrack",
+  "email": "admin@medtrack.local",
   "password": "admin_medtrack@MedTrack#2026"
 }
 ```
@@ -53,6 +54,17 @@ Login response returns `token` + `user` role.
 Use it in subsequent requests:
 
 `Authorization: Bearer <token>`
+
+Register request:
+
+```json
+{
+  "name": "Priya Sharma",
+  "email": "priya.sharma@example.com",
+  "password": "SecurePass123",
+  "role": "Pharmacy"
+}
+```
 
 ### Scan
 
@@ -88,6 +100,36 @@ Expired with override (should return `200`):
   "treatment_duration_days": 10,
   "override_reason": "Doctor approved completion of ongoing course"
 }
+```
+
+## Database Security (RBAC + Secure Views)
+
+Database-level hardening is defined in:
+
+- `db_init/06_security.sql`
+
+This script adds:
+
+- `Secure views`
+- `vw_manufacturer_production` (hides downstream ownership details)
+- `vw_pharmacy_public_inventory` (exposes stock status, not exact quantity)
+- `vw_global_threat_dashboard` (masks GPS to city-level precision)
+- `Roles`
+- `role_medtrack_admin`
+- `role_medtrack_manufacturer`
+- `role_medtrack_pharmacy`
+- Least-privilege grants for each role (including procedure execute permissions)
+
+If your MySQL volume was already initialized before adding this file, run it manually:
+
+```bash
+docker compose exec -T mysql mysql -uroot -proot PharmaGuard < db_init/06_security.sql
+```
+
+Quick verification:
+
+```bash
+docker compose exec -T mysql mysql -uroot -proot -D PharmaGuard -e "SHOW FULL TABLES WHERE Table_type='VIEW'; SHOW GRANTS FOR role_medtrack_admin; SHOW GRANTS FOR role_medtrack_manufacturer; SHOW GRANTS FOR role_medtrack_pharmacy;"
 ```
 
 ## Config

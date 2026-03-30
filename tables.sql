@@ -65,6 +65,9 @@ CREATE TABLE BATCH (
     FOREIGN KEY (current_owner_id) REFERENCES ACTOR(actor_id) ON DELETE RESTRICT
 );
 
+ALTER TABLE BATCH 
+ADD risk_score INT DEFAULT 0,
+ADD status ENUM('SAFE','WARNING','BLOCKED') DEFAULT 'SAFE';
 -- ==========================================
 -- 3. THE ACTION ENTITIES (Phase 2)
 -- ==========================================

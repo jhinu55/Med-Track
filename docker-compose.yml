@@ -1,0 +1,99 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: medtrack-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: PharmaGuard
+      MYSQL_USER: medtrack
+      MYSQL_PASSWORD: medtrack123
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./db_init:/docker-entrypoint-initdb.d:ro
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - medtrack-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: medtrack-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - medtrack-net
+
+  flask-api:
+    build:
+      context: ./flask-api
+      dockerfile: Dockerfile
+    container_name: medtrack-flask-api
+    restart: unless-stopped
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DB: PharmaGuard
+      MYSQL_USER: medtrack
+      MYSQL_PASSWORD: medtrack123
+      MYSQL_POOL_SIZE: 10
+      REDIS_URL: ${REDIS_URL:-}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_USERNAME: ${REDIS_USERNAME:-}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_SSL: ${REDIS_SSL:-false}
+      CACHE_TTL_SECONDS: 900
+    ports:
+      - "5000:5000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - medtrack-net
+
+  ai-worker:
+    build:
+      context: ./ai-worker
+      dockerfile: Dockerfile
+    container_name: medtrack-ai-worker
+    restart: unless-stopped
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DB: PharmaGuard
+      MYSQL_USER: medtrack
+      MYSQL_PASSWORD: medtrack123
+      SCAN_FETCH_LIMIT: 1000
+      POLL_INTERVAL_SECONDS: 300
+      MAX_SPEED_KMH: 900
+      DBSCAN_EPS_KM: 15
+      DBSCAN_MIN_SAMPLES: 4
+      ALERT_DEDUP_MINUTES: 30
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - medtrack-net
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  medtrack-net:
+    driver: bridge

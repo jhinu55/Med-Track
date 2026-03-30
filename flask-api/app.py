@@ -1,5 +1,7 @@
 import json
 import os
+import hashlib
+import secrets
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
@@ -19,6 +21,7 @@ MYSQL_CONFIG = {
 
 MYSQL_POOL_SIZE = int(os.getenv("MYSQL_POOL_SIZE", "10"))
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "900"))
+AUTH_TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "43200"))
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
 mysql_pool = pooling.MySQLConnectionPool(
@@ -64,6 +67,45 @@ BLOCKED_STATUSES = {"Expired", "Counterfeit"}
 
 def _cache_key(qr_hash: str) -> str:
     return f"scan_batch:{qr_hash}"
+
+
+def _auth_cache_key(token: str) -> str:
+    return f"auth_token:{token}"
+
+
+def _hash_password(plain_password: str) -> str:
+    return hashlib.sha256(plain_password.encode("utf-8")).hexdigest()
+
+
+def _write_auth_session(token: str, payload: dict) -> None:
+    redis_client.setex(_auth_cache_key(token), AUTH_TOKEN_TTL_SECONDS, json.dumps(payload))
+
+
+def _read_auth_session(token: str) -> dict | None:
+    raw = redis_client.get(_auth_cache_key(token))
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def _extract_bearer_token() -> str | None:
+    auth_header = request.headers.get("Authorization", "").strip()
+    if not auth_header:
+        return None
+
+    parts = auth_header.split(" ", 1)
+    if len(parts) != 2:
+        return None
+
+    scheme, token = parts
+    if scheme.lower() != "bearer":
+        return None
+
+    token = token.strip()
+    return token or None
 
 
 def _read_cache(qr_hash: str) -> dict | None:
@@ -121,6 +163,98 @@ def health() -> tuple:
         return jsonify({"status": "unhealthy", "error": str(exc)}), 500
 
     return jsonify({"status": "ok"}), 200
+
+
+@app.post("/api/auth/login")
+def auth_login() -> tuple:
+    payload = request.get_json(silent=True) or {}
+    username = (payload.get("username") or "").strip()
+    password = payload.get("password") or ""
+
+    if not username or not password:
+        return jsonify({"error": "Fields 'username' and 'password' are required"}), 400
+
+    conn = None
+    cur = None
+    try:
+        conn = mysql_pool.get_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT actor_id, username, email, role_type, password_hash
+            FROM ACTOR
+            WHERE username = %s
+            LIMIT 1
+            """,
+            (username,),
+        )
+        actor = cur.fetchone()
+    except Error as exc:
+        return jsonify({"error": f"Database error during login: {exc}"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+    if not actor:
+        return jsonify({"error": "Invalid username or password"}), 401
+
+    if actor["password_hash"] != _hash_password(password):
+        return jsonify({"error": "Invalid username or password"}), 401
+
+    token = secrets.token_urlsafe(32)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    session_payload = {
+        "actor_id": int(actor["actor_id"]),
+        "username": actor["username"],
+        "email": actor["email"],
+        "role": actor["role_type"],
+        "issued_at": now_iso,
+    }
+    _write_auth_session(token, session_payload)
+
+    return (
+        jsonify(
+            {
+                "token": token,
+                "token_type": "Bearer",
+                "expires_in": AUTH_TOKEN_TTL_SECONDS,
+                "user": {
+                    "actor_id": int(actor["actor_id"]),
+                    "username": actor["username"],
+                    "email": actor["email"],
+                    "role": actor["role_type"],
+                },
+            }
+        ),
+        200,
+    )
+
+
+@app.get("/api/auth/me")
+def auth_me() -> tuple:
+    token = _extract_bearer_token()
+    if not token:
+        return jsonify({"error": "Missing bearer token"}), 401
+
+    session = _read_auth_session(token)
+    if not session:
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    return (
+        jsonify(
+            {
+                "user": {
+                    "actor_id": session.get("actor_id"),
+                    "username": session.get("username"),
+                    "email": session.get("email"),
+                    "role": session.get("role"),
+                }
+            }
+        ),
+        200,
+    )
 
 
 @app.post("/api/scan_batch")

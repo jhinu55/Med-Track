@@ -27,6 +27,7 @@ from datetime import date, datetime, time, timedelta
 
 import mysql.connector
 from faker import Faker
+from werkzeug.security import generate_password_hash
 
 DB_HOST = os.getenv("DB_HOST", os.getenv("MYSQL_HOST", "localhost"))
 DB_PORT = int(os.getenv("DB_PORT", os.getenv("MYSQL_PORT", "3307")))
@@ -80,8 +81,9 @@ def clear_existing_data(cur) -> None:
     cur.execute("SET FOREIGN_KEY_CHECKS = 1")
 
 
-def insert_actor(cur, username: str, email: str, role_type: str) -> int:
-    password_hash = sha256_hex(f"{username}@MedTrack#2026")
+def insert_actor(cur, username: str, email: str, role_type: str, password: str | None = None) -> int:
+    raw_password = password or f"{username}@MedTrack#2026"
+    password_hash = generate_password_hash(raw_password)
     cur.execute(
         """
         INSERT INTO ACTOR (username, password_hash, email, role_type)
@@ -135,19 +137,19 @@ def seed_actors(cur, fake: Faker):
 
     # 10 Pharmacies with city-distributed GPS
     city_coordinates = [
-        ("Mumbai", 19.0760, 72.8777),
-        ("Delhi", 28.6139, 77.2090),
-        ("Bengaluru", 12.9716, 77.5946),
-        ("Hyderabad", 17.3850, 78.4867),
-        ("Chennai", 13.0827, 80.2707),
-        ("Kolkata", 22.5726, 88.3639),
-        ("Pune", 18.5204, 73.8567),
-        ("Ahmedabad", 23.0225, 72.5714),
-        ("Jaipur", 26.9124, 75.7873),
-        ("Lucknow", 26.8467, 80.9462),
+        ("Mumbai", 19.0760, 72.8777, "Maharashtra"),
+        ("Delhi", 28.6139, 77.2090, "Delhi"),
+        ("Bengaluru", 12.9716, 77.5946, "Karnataka"),
+        ("Hyderabad", 17.3850, 78.4867, "Telangana"),
+        ("Chennai", 13.0827, 80.2707, "Tamil Nadu"),
+        ("Kolkata", 22.5726, 88.3639, "West Bengal"),
+        ("Pune", 18.5204, 73.8567, "Maharashtra"),
+        ("Ahmedabad", 23.0225, 72.5714, "Gujarat"),
+        ("Jaipur", 26.9124, 75.7873, "Rajasthan"),
+        ("Lucknow", 26.8467, 80.9462, "Uttar Pradesh"),
     ]
     pharmacies = []
-    for idx, (city, lat, lng) in enumerate(city_coordinates, start=1):
+    for idx, (city, lat, lng, state) in enumerate(city_coordinates, start=1):
         username = f"pharmacy_{city.lower()}_{idx}"
         actor_id = insert_actor(
             cur=cur,
@@ -158,13 +160,18 @@ def seed_actors(cur, fake: Faker):
         pharmacy_license = f"PHR-{city[:3].upper()}-{fake.random_number(digits=6, fix_len=True)}"
         lat_jittered = round(lat + random.uniform(-0.06, 0.06), 8)
         lng_jittered = round(lng + random.uniform(-0.06, 0.06), 8)
+        street_no = random.randint(1, 999)
+        address = f"{street_no} {fake.street_name()}"
+        pincode = str(random.randint(100000, 999999))
 
         cur.execute(
             """
-            INSERT INTO PHARMACY (actor_id, pharmacy_license, gps_lat, gps_long)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO PHARMACY (actor_id, pharmacy_license, gps_lat, gps_long,
+                                  address, city, state, pincode)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (actor_id, pharmacy_license, lat_jittered, lng_jittered),
+            (actor_id, pharmacy_license, lat_jittered, lng_jittered,
+             address, city, state, pincode),
         )
         pharmacies.append(
             {

@@ -56,6 +56,9 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       REDIS_SSL: ${REDIS_SSL:-false}
       CACHE_TTL_SECONDS: 900
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      JWT_EXPIRES_HOURS: ${JWT_EXPIRES_HOURS:-24}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
     ports:
       - "5000:5000"
     depends_on:

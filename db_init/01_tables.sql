@@ -30,6 +30,10 @@ CREATE TABLE PHARMACY (
     pharmacy_license VARCHAR(50) NOT NULL UNIQUE,
     gps_lat DECIMAL(10, 8) NOT NULL,  -- Crucial for Velocity Checks
     gps_long DECIMAL(11, 8) NOT NULL,
+    address  VARCHAR(255) DEFAULT NULL,
+    city     VARCHAR(100) DEFAULT NULL,
+    state    VARCHAR(100) DEFAULT NULL,
+    pincode  VARCHAR(10)  DEFAULT NULL,
     FOREIGN KEY (actor_id) REFERENCES ACTOR(actor_id) ON DELETE CASCADE
 );
 
@@ -60,6 +64,7 @@ CREATE TABLE BATCH (
     mfg_date DATE NOT NULL,
     expiry_date DATE NOT NULL,
     current_owner_id INT NOT NULL, -- Tracks who legally holds it right now
+    batch_status ENUM('Active', 'WARNING', 'BLOCKED') NOT NULL DEFAULT 'Active',
     
     FOREIGN KEY (medicine_id) REFERENCES MEDICINE(medicine_id) ON DELETE RESTRICT,
     FOREIGN KEY (current_owner_id) REFERENCES ACTOR(actor_id) ON DELETE RESTRICT

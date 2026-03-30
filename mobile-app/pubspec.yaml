@@ -1,0 +1,40 @@
+name: medtrack_mobile
+description: MedTrack mobile app – Manufacturer / Pharmacy / Admin portals.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.2.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Routing
+  go_router: ^13.2.0
+
+  # HTTP client
+  dio: ^5.4.3+1
+
+  # Secure token storage
+  flutter_secure_storage: ^9.2.2
+
+  # QR code scanner
+  mobile_scanner: ^5.1.1
+
+  # GPS / geolocation
+  geolocator: ^12.0.0
+
+  # State management (simple provider)
+  provider: ^6.1.2
+
+  # Utility
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true

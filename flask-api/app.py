@@ -6,8 +6,10 @@ from flask import Flask, jsonify, request
 import mysql.connector
 from mysql.connector import Error, pooling
 import redis
+from routes.medicine_ai import medicine_ai_bp
 
 app = Flask(__name__)
+app.register_blueprint(medicine_ai_bp)
 
 MYSQL_CONFIG = {
     "host": os.getenv("MYSQL_HOST", "mysql"),

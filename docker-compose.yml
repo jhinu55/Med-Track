@@ -56,6 +56,8 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       REDIS_SSL: ${REDIS_SSL:-false}
       CACHE_TTL_SECONDS: 900
+      AUTH_TOKEN_TTL_SECONDS: ${AUTH_TOKEN_TTL_SECONDS:-43200}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
     ports:
       - "5000:5000"
     depends_on:

@@ -3,17 +3,20 @@ import os
 import time
 from math import asin, cos, radians, sin, sqrt
 
-import mysql.connector
-from mysql.connector import Error
+import psycopg2
+from psycopg2 import Error
+from psycopg2.extras import RealDictCursor
 import numpy as np
 import pandas as pd
 from sklearn.cluster import DBSCAN
 
-MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql")
-MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
-MYSQL_DB = os.getenv("MYSQL_DB", "PharmaGuard")
-MYSQL_USER = os.getenv("MYSQL_USER", "medtrack")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "medtrack123")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+PGHOST = os.getenv("PGHOST", "")
+PGPORT = int(os.getenv("PGPORT", "5432"))
+PGDATABASE = os.getenv("PGDATABASE", "postgres")
+PGUSER = os.getenv("PGUSER", "postgres")
+PGPASSWORD = os.getenv("PGPASSWORD", "")
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
 SCAN_FETCH_LIMIT = int(os.getenv("SCAN_FETCH_LIMIT", "1000"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
@@ -30,12 +33,19 @@ logger = logging.getLogger("ai-worker")
 
 
 def get_connection():
-    return mysql.connector.connect(
-        host=MYSQL_HOST,
-        port=MYSQL_PORT,
-        database=MYSQL_DB,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
+    if DATABASE_URL:
+        return psycopg2.connect(DATABASE_URL)
+
+    if not PGHOST:
+        raise ValueError("Database connection is not configured. Set DATABASE_URL or PGHOST.")
+
+    return psycopg2.connect(
+        host=PGHOST,
+        port=PGPORT,
+        dbname=PGDATABASE,
+        user=PGUSER,
+        password=PGPASSWORD,
+        sslmode=DB_SSLMODE,
     )
 
 
@@ -58,7 +68,7 @@ def load_recent_scans(conn) -> pd.DataFrame:
         ORDER BY scan_timestamp DESC
         LIMIT %s
     """
-    cur = conn.cursor(dictionary=True)
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute(query, (SCAN_FETCH_LIMIT,))
     rows = cur.fetchall()
     cur.close()
@@ -133,16 +143,15 @@ def write_alerts(conn, anomalies: pd.DataFrame) -> int:
         return 0
 
     dedup_window = max(ALERT_DEDUP_MINUTES, 1)
-    query = f"""
+    query = """
         INSERT INTO ALERT (batch_id, alert_type, severity)
         SELECT %s, 'Geo-Anomaly', 'High'
-        FROM DUAL
         WHERE NOT EXISTS (
             SELECT 1
             FROM ALERT
             WHERE batch_id = %s
               AND alert_type = 'Geo-Anomaly'
-              AND alert_timestamp > DATE_SUB(NOW(), INTERVAL {dedup_window} MINUTE)
+              AND alert_timestamp > NOW() - (%s * INTERVAL '1 minute')
         )
     """
 
@@ -150,7 +159,7 @@ def write_alerts(conn, anomalies: pd.DataFrame) -> int:
     inserted = 0
 
     for batch_id in batch_ids:
-        cur.execute(query, (batch_id, batch_id))
+        cur.execute(query, (batch_id, batch_id, dedup_window))
         inserted += cur.rowcount
 
     conn.commit()
@@ -176,7 +185,7 @@ def run_once() -> None:
             logger.info("No new Geo-Anomaly alerts inserted.")
 
     except Error as exc:
-        logger.exception("MySQL error: %s", exc)
+        logger.exception("Postgres error: %s", exc)
     except Exception as exc:  # pragma: no cover
         logger.exception("Unhandled worker error: %s", exc)
     finally:

@@ -1,5 +1,5 @@
 // lib/models/models.dart
-// Data classes matching the MySQL schema.
+// Data classes matching the MedTrack backend schema.
 
 class MedUser {
   final int actorId;

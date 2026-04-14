@@ -1,13 +1,31 @@
-# MedTrack Backend
+# MedTrack Backend (Supabase + Redis)
 
-This repository contains the MedTrack backend stack:
+This repository now runs with:
 
-- `mysql` (schema + procedures + triggers from `db_init/`)
+- `Supabase Postgres` (primary database)
 - `redis` (scan + auth session cache)
 - `flask-api` (REST API)
 - `ai-worker` (background anomaly detector)
 
-## Run Locally
+## 1) Bootstrap Supabase Schema
+
+Run the SQL in [`supabase/01_schema.sql`](supabase/01_schema.sql) inside your Supabase SQL Editor.
+
+## 2) Configure Environment
+
+```bash
+cp .env.example .env
+```
+
+Set at least:
+
+- `PGPASSWORD` (your Supabase DB password)
+- `GEMINI_API_KEY` (required for `/api/medicine/*` routes)
+
+If you prefer a single connection string, set `DATABASE_URL` and you can leave `PG*` vars empty.
+If direct `db.<project-ref>.supabase.co` is unreachable from your network (IPv6-only routing issue), use the Supabase pooler host and pooled username format (`postgres.<project_ref>`) on port `6543`.
+
+## 3) Run Locally
 
 ```bash
 docker compose down
@@ -21,7 +39,7 @@ Health check:
 curl -i http://localhost:5000/health
 ```
 
-## Seed Test Data
+## 4) Seed Test Data
 
 ```bash
 docker compose exec -T flask-api python seed.py
@@ -50,7 +68,7 @@ Login request:
 }
 ```
 
-Login response returns `token` + `user` role.  
+Login response returns `token` + `user` role.
 Use it in subsequent requests:
 
 `Authorization: Bearer <token>`
@@ -102,45 +120,7 @@ Expired with override (should return `200`):
 }
 ```
 
-## Database Security (RBAC + Secure Views)
+## Notes
 
-Database-level hardening is defined in:
-
-- `db_init/06_security.sql`
-
-This script adds:
-
-- `Secure views`
-- `vw_manufacturer_production` (hides downstream ownership details)
-- `vw_pharmacy_public_inventory` (exposes stock status, not exact quantity)
-- `vw_global_threat_dashboard` (masks GPS to city-level precision)
-- `Roles`
-- `role_medtrack_admin`
-- `role_medtrack_manufacturer`
-- `role_medtrack_pharmacy`
-- Least-privilege grants for each role (including procedure execute permissions)
-
-If your MySQL volume was already initialized before adding this file, run it manually:
-
-```bash
-docker compose exec -T mysql mysql -uroot -proot PharmaGuard < db_init/06_security.sql
-```
-
-Quick verification:
-
-```bash
-docker compose exec -T mysql mysql -uroot -proot -D PharmaGuard -e "SHOW FULL TABLES WHERE Table_type='VIEW'; SHOW GRANTS FOR role_medtrack_admin; SHOW GRANTS FOR role_medtrack_manufacturer; SHOW GRANTS FOR role_medtrack_pharmacy;"
-```
-
-## Config
-
-Copy env template and customize if needed:
-
-```bash
-cp .env.example .env
-```
-
-Important env vars:
-
-- `CACHE_TTL_SECONDS` (default scan cache TTL)
-- `AUTH_TOKEN_TTL_SECONDS` (auth token TTL, default `43200` seconds)
+- `db_init/` still contains legacy MySQL scripts for reference.
+- Active Supabase bootstrap SQL is under `supabase/`.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Seed script for MedTrack MySQL database.
+Seed script for MedTrack PostgreSQL database (Supabase compatible).
 
 What it does:
 1) Clears existing transactional/master data.
@@ -25,14 +25,16 @@ import random
 import uuid
 from datetime import date, datetime, time, timedelta
 
-import mysql.connector
+import psycopg2
 from faker import Faker
 
-DB_HOST = os.getenv("DB_HOST", os.getenv("MYSQL_HOST", "localhost"))
-DB_PORT = int(os.getenv("DB_PORT", os.getenv("MYSQL_PORT", "3307")))
-DB_USER = os.getenv("DB_USER", os.getenv("MYSQL_USER", "medtrack"))
-DB_PASSWORD = os.getenv("DB_PASSWORD", os.getenv("MYSQL_PASSWORD", "medtrack123"))
-DB_NAME = os.getenv("DB_NAME", os.getenv("MYSQL_DB", "PharmaGuard"))
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DB_HOST = os.getenv("DB_HOST", os.getenv("PGHOST", ""))
+DB_PORT = int(os.getenv("DB_PORT", os.getenv("PGPORT", "5432")))
+DB_USER = os.getenv("DB_USER", os.getenv("PGUSER", "postgres"))
+DB_PASSWORD = os.getenv("DB_PASSWORD", os.getenv("PGPASSWORD", ""))
+DB_NAME = os.getenv("DB_NAME", os.getenv("PGDATABASE", "postgres"))
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
 TOTAL_BATCHES = 500
 VALID_RATIO = 0.80
@@ -50,34 +52,41 @@ def random_qr_hash(seed_text: str) -> str:
 
 
 def connect():
-    return mysql.connector.connect(
+    if DATABASE_URL:
+        return psycopg2.connect(DATABASE_URL)
+
+    if not DB_HOST:
+        raise ValueError("Database connection is not configured. Set DATABASE_URL or PGHOST.")
+
+    return psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
         user=DB_USER,
         password=DB_PASSWORD,
-        database=DB_NAME,
+        dbname=DB_NAME,
+        sslmode=DB_SSLMODE,
     )
 
 
 def clear_existing_data(cur) -> None:
-    tables = [
-        "ALERT",
-        "SCAN_LOG",
-        "SALE_TRANSACTION",
-        "TRANSFER_LOG",
-        "INVENTORY",
-        "BATCH",
-        "MEDICINE",
-        "MANUFACTURER",
-        "PHARMACY",
-        "ADMIN",
-        "ACTOR",
-    ]
-
-    cur.execute("SET FOREIGN_KEY_CHECKS = 0")
-    for table in tables:
-        cur.execute(f"TRUNCATE TABLE {table}")
-    cur.execute("SET FOREIGN_KEY_CHECKS = 1")
+    cur.execute(
+        """
+        TRUNCATE TABLE
+            ALERT,
+            SCAN_LOG,
+            SALE_TRANSACTION,
+            TRANSFER_LOG,
+            INVENTORY,
+            BATCH,
+            MEDICINE,
+            MANUFACTURER,
+            PHARMACY,
+            ADMIN,
+            CUSTOMER,
+            ACTOR
+        RESTART IDENTITY CASCADE
+        """
+    )
 
 
 def insert_actor(cur, username: str, email: str, role_type: str) -> int:
@@ -86,10 +95,11 @@ def insert_actor(cur, username: str, email: str, role_type: str) -> int:
         """
         INSERT INTO ACTOR (username, password_hash, email, role_type)
         VALUES (%s, %s, %s, %s)
+        RETURNING actor_id
         """,
         (username, password_hash, email, role_type),
     )
-    return int(cur.lastrowid)
+    return int(cur.fetchone()[0])
 
 
 def seed_actors(cur, fake: Faker):

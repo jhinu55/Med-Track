@@ -2,36 +2,49 @@ import json
 import os
 import hashlib
 import secrets
+import random
+import re
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
-import mysql.connector
-from mysql.connector import Error, pooling
+import psycopg2
+from psycopg2 import Error
+from psycopg2.extras import RealDictCursor
 import redis
 from routes.medicine_ai import medicine_ai_bp
 
 app = Flask(__name__)
 app.register_blueprint(medicine_ai_bp)
 
-MYSQL_CONFIG = {
-    "host": os.getenv("MYSQL_HOST", "mysql"),
-    "port": int(os.getenv("MYSQL_PORT", "3306")),
-    "database": os.getenv("MYSQL_DB", "PharmaGuard"),
-    "user": os.getenv("MYSQL_USER", "medtrack"),
-    "password": os.getenv("MYSQL_PASSWORD", "medtrack123"),
-}
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+PGHOST = os.getenv("PGHOST", "")
+PGPORT = int(os.getenv("PGPORT", "5432"))
+PGDATABASE = os.getenv("PGDATABASE", "postgres")
+PGUSER = os.getenv("PGUSER", "postgres")
+PGPASSWORD = os.getenv("PGPASSWORD", "")
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
-MYSQL_POOL_SIZE = int(os.getenv("MYSQL_POOL_SIZE", "10"))
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "900"))
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "43200"))
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
-mysql_pool = pooling.MySQLConnectionPool(
-    pool_name="medtrack_pool",
-    pool_size=MYSQL_POOL_SIZE,
-    pool_reset_session=True,
-    **MYSQL_CONFIG,
-)
+
+def _get_db_connection():
+    if DATABASE_URL:
+        return psycopg2.connect(DATABASE_URL)
+
+    if not PGHOST:
+        raise ValueError("Database connection is not configured. Set DATABASE_URL or PGHOST.")
+
+    return psycopg2.connect(
+        host=PGHOST,
+        port=PGPORT,
+        dbname=PGDATABASE,
+        user=PGUSER,
+        password=PGPASSWORD,
+        sslmode=DB_SSLMODE,
+    )
+
 
 def _build_redis_client() -> redis.Redis:
     """
@@ -77,6 +90,89 @@ def _auth_cache_key(token: str) -> str:
 
 def _hash_password(plain_password: str) -> str:
     return hashlib.sha256(plain_password.encode("utf-8")).hexdigest()
+
+
+def _normalize_role(role: str) -> str | None:
+    role_map = {
+        "admin": "Admin",
+        "administrator": "Admin",
+        "manufacturer": "Manufacturer",
+        "pharmacy": "Pharmacy",
+        "customer": "Customer",
+    }
+    key = (role or "").strip().lower()
+    return role_map.get(key)
+
+
+def _slugify_username_seed(raw: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", raw or "").strip("_").lower()
+    if not cleaned:
+        cleaned = "user"
+    return cleaned[:32]
+
+
+def _generate_unique_username(cur, seed: str) -> str:
+    base = _slugify_username_seed(seed)
+    for _ in range(30):
+        suffix = secrets.token_hex(2)
+        candidate = f"{base}_{suffix}"[:50]
+        cur.execute("SELECT 1 FROM ACTOR WHERE username = %s LIMIT 1", (candidate,))
+        if not cur.fetchone():
+            return candidate
+
+    return f"user_{secrets.token_hex(6)}"[:50]
+
+
+def _generate_unique_code(cur, table: str, column: str, prefix: str, width: int = 10) -> str:
+    for _ in range(40):
+        candidate = f"{prefix}-{secrets.token_hex(width // 2).upper()}"
+        cur.execute(f"SELECT 1 FROM {table} WHERE {column} = %s LIMIT 1", (candidate,))
+        if not cur.fetchone():
+            return candidate
+    return f"{prefix}-{secrets.token_hex(8).upper()}"
+
+
+def _default_pharmacy_coords() -> tuple[float, float]:
+    # Broad spread for mock setup; callers may still provide explicit coords.
+    anchors = [
+        (19.0760, 72.8777),  # Mumbai
+        (28.6139, 77.2090),  # Delhi
+        (12.9716, 77.5946),  # Bengaluru
+        (17.3850, 78.4867),  # Hyderabad
+        (13.0827, 80.2707),  # Chennai
+    ]
+    lat, lng = random.choice(anchors)
+    return round(lat + random.uniform(-0.05, 0.05), 8), round(lng + random.uniform(-0.05, 0.05), 8)
+
+
+def _build_auth_response(actor: dict) -> tuple:
+    token = secrets.token_urlsafe(32)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    session_payload = {
+        "actor_id": int(actor["actor_id"]),
+        "username": actor["username"],
+        "email": actor["email"],
+        "role": actor["role_type"],
+        "issued_at": now_iso,
+    }
+    _write_auth_session(token, session_payload)
+
+    return (
+        jsonify(
+            {
+                "token": token,
+                "token_type": "Bearer",
+                "expires_in": AUTH_TOKEN_TTL_SECONDS,
+                "user": {
+                    "actor_id": int(actor["actor_id"]),
+                    "username": actor["username"],
+                    "email": actor["email"],
+                    "role": actor["role_type"],
+                },
+            }
+        ),
+        200,
+    )
 
 
 def _write_auth_session(token: str, payload: dict) -> None:
@@ -153,16 +249,21 @@ def _lookup_batch_by_hash(cursor, qr_hash: str) -> dict | None:
 
 @app.get("/health")
 def health() -> tuple:
+    conn = None
+    cur = None
     try:
         redis_client.ping()
-        conn = mysql_pool.get_connection()
+        conn = _get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT 1")
         cur.fetchone()
-        cur.close()
-        conn.close()
     except Exception as exc:  # pragma: no cover
         return jsonify({"status": "unhealthy", "error": str(exc)}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
     return jsonify({"status": "ok"}), 200
 
@@ -170,25 +271,25 @@ def health() -> tuple:
 @app.post("/api/auth/login")
 def auth_login() -> tuple:
     payload = request.get_json(silent=True) or {}
-    username = (payload.get("username") or "").strip()
+    login_id = (payload.get("username") or payload.get("email") or "").strip()
     password = payload.get("password") or ""
 
-    if not username or not password:
-        return jsonify({"error": "Fields 'username' and 'password' are required"}), 400
+    if not login_id or not password:
+        return jsonify({"error": "Fields 'username/email' and 'password' are required"}), 400
 
     conn = None
     cur = None
     try:
-        conn = mysql_pool.get_connection()
-        cur = conn.cursor(dictionary=True)
+        conn = _get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(
             """
             SELECT actor_id, username, email, role_type, password_hash
             FROM ACTOR
-            WHERE username = %s
+            WHERE username = %s OR email = %s
             LIMIT 1
             """,
-            (username,),
+            (login_id, login_id),
         )
         actor = cur.fetchone()
     except Error as exc:
@@ -205,33 +306,133 @@ def auth_login() -> tuple:
     if actor["password_hash"] != _hash_password(password):
         return jsonify({"error": "Invalid username or password"}), 401
 
-    token = secrets.token_urlsafe(32)
-    now_iso = datetime.now(timezone.utc).isoformat()
-    session_payload = {
-        "actor_id": int(actor["actor_id"]),
-        "username": actor["username"],
-        "email": actor["email"],
-        "role": actor["role_type"],
-        "issued_at": now_iso,
-    }
-    _write_auth_session(token, session_payload)
+    return _build_auth_response(actor)
 
-    return (
-        jsonify(
-            {
-                "token": token,
-                "token_type": "Bearer",
-                "expires_in": AUTH_TOKEN_TTL_SECONDS,
-                "user": {
-                    "actor_id": int(actor["actor_id"]),
-                    "username": actor["username"],
-                    "email": actor["email"],
-                    "role": actor["role_type"],
-                },
-            }
-        ),
-        200,
-    )
+
+@app.post("/api/auth/register")
+def auth_register() -> tuple:
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or "").strip()
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+    role_input = (payload.get("role") or "").strip()
+
+    if not name or not email or not password or not role_input:
+        return jsonify({"error": "Fields 'name', 'email', 'password', and 'role' are required"}), 400
+    if "@" not in email:
+        return jsonify({"error": "Invalid email format"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+
+    role_type = _normalize_role(role_input)
+    if not role_type:
+        return jsonify({"error": "Invalid role. Use Admin, Manufacturer, Pharmacy, or Customer"}), 400
+
+    conn = None
+    cur = None
+    actor_row = None
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        cur.execute("SELECT 1 FROM ACTOR WHERE email = %s LIMIT 1", (email,))
+        if cur.fetchone():
+            conn.rollback()
+            return jsonify({"error": "Email already registered"}), 409
+
+        username_seed = payload.get("username") or email.split("@")[0] or name
+        username = _generate_unique_username(cur, username_seed)
+        password_hash = _hash_password(password)
+
+        cur.execute(
+            """
+            INSERT INTO ACTOR (username, password_hash, email, role_type)
+            VALUES (%s, %s, %s, %s)
+            RETURNING actor_id
+            """,
+            (username, password_hash, email, role_type),
+        )
+        actor_id = int(cur.fetchone()["actor_id"])
+
+        if role_type == "Admin":
+            clearance = int(payload.get("security_clearance_level") or 1)
+            cur.execute(
+                """
+                INSERT INTO ADMIN (actor_id, security_clearance_level)
+                VALUES (%s, %s)
+                """,
+                (actor_id, max(clearance, 1)),
+            )
+        elif role_type == "Manufacturer":
+            license_no = _generate_unique_code(cur, "MANUFACTURER", "license_no", "MFG-LIC")
+            production_capacity = int(payload.get("production_capacity") or 50000)
+            cur.execute(
+                """
+                INSERT INTO MANUFACTURER (actor_id, license_no, production_capacity)
+                VALUES (%s, %s, %s)
+                """,
+                (actor_id, license_no, production_capacity),
+            )
+        elif role_type == "Pharmacy":
+            pharmacy_license = _generate_unique_code(cur, "PHARMACY", "pharmacy_license", "PHR")
+            if payload.get("gps_lat") is not None and payload.get("gps_long") is not None:
+                gps_lat = float(payload["gps_lat"])
+                gps_long = float(payload["gps_long"])
+            else:
+                gps_lat, gps_long = _default_pharmacy_coords()
+
+            cur.execute(
+                """
+                INSERT INTO PHARMACY (actor_id, pharmacy_license, gps_lat, gps_long)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (actor_id, pharmacy_license, gps_lat, gps_long),
+            )
+        elif role_type == "Customer":
+            cur.execute(
+                """
+                INSERT INTO CUSTOMER (actor_id, phone_number, device_id)
+                VALUES (%s, %s, %s)
+                """,
+                (
+                    actor_id,
+                    (payload.get("phone_number") or None),
+                    (payload.get("device_id") or None),
+                ),
+            )
+
+        cur.execute(
+            """
+            SELECT actor_id, username, email, role_type
+            FROM ACTOR
+            WHERE actor_id = %s
+            LIMIT 1
+            """,
+            (actor_id,),
+        )
+        actor_row = cur.fetchone()
+        conn.commit()
+
+    except ValueError as exc:
+        if conn:
+            conn.rollback()
+        return jsonify({"error": str(exc)}), 400
+    except Error as exc:
+        if conn:
+            conn.rollback()
+        if getattr(exc, "pgcode", None) == "23505":
+            return jsonify({"error": "User already exists with duplicate unique field"}), 409
+        return jsonify({"error": f"Database error during registration: {exc}"}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+    if not actor_row:
+        return jsonify({"error": "Failed to create user"}), 500
+
+    return _build_auth_response(actor_row)
 
 
 @app.get("/api/auth/me")
@@ -328,11 +529,10 @@ def scan_batch() -> tuple:
     batch_id = cached.get("batch_id") if cached else None
 
     try:
-        conn = mysql_pool.get_connection()
-        conn.start_transaction()
+        conn = _get_db_connection()
 
         if not batch_id:
-            meta_cursor = conn.cursor(dictionary=True)
+            meta_cursor = conn.cursor(cursor_factory=RealDictCursor)
             batch_meta = _lookup_batch_by_hash(meta_cursor, qr_hash)
 
             if not batch_meta:
@@ -341,8 +541,8 @@ def scan_batch() -> tuple:
             batch_id = int(batch_meta["batch_id"])
 
         proc_cursor = conn.cursor()
-        proc_cursor.callproc(
-            "PROCESS_SALE",
+        proc_cursor.execute(
+            "SELECT process_sale(%s, %s, %s, %s, %s)",
             [
                 pharmacy_id,
                 int(batch_id),
@@ -366,7 +566,7 @@ def scan_batch() -> tuple:
                 {
                     "allowed": True,
                     "status": "Valid",
-                    "source": "mysql",
+                    "source": "postgres",
                     "batch_id": int(batch_id),
                 }
             ),

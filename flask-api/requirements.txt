@@ -4,3 +4,4 @@ mysql-connector-python==9.0.0
 redis==5.0.8
 hiredis==3.0.0
 Faker==30.8.2
+Flask-Cors==4.0.0

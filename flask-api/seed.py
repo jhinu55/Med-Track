@@ -29,9 +29,9 @@ import mysql.connector
 from faker import Faker
 
 DB_HOST = os.getenv("DB_HOST", os.getenv("MYSQL_HOST", "localhost"))
-DB_PORT = int(os.getenv("DB_PORT", os.getenv("MYSQL_PORT", "3307")))
-DB_USER = os.getenv("DB_USER", os.getenv("MYSQL_USER", "medtrack"))
-DB_PASSWORD = os.getenv("DB_PASSWORD", os.getenv("MYSQL_PASSWORD", "medtrack123"))
+DB_PORT = int(os.getenv("DB_PORT", os.getenv("MYSQL_PORT", "3306")))
+DB_USER = os.getenv("DB_USER", os.getenv("MYSQL_USER", "root"))
+DB_PASSWORD = os.getenv("DB_PASSWORD", os.getenv("MYSQL_PASSWORD", "Arya@ig9809"))
 DB_NAME = os.getenv("DB_NAME", os.getenv("MYSQL_DB", "PharmaGuard"))
 
 TOTAL_BATCHES = 500

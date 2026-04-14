@@ -12,8 +12,8 @@ from sklearn.cluster import DBSCAN
 MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql")
 MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
 MYSQL_DB = os.getenv("MYSQL_DB", "PharmaGuard")
-MYSQL_USER = os.getenv("MYSQL_USER", "medtrack")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "medtrack123")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "Arya@ig9809")
 
 SCAN_FETCH_LIMIT = int(os.getenv("SCAN_FETCH_LIMIT", "1000"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))

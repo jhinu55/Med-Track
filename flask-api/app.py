@@ -2,19 +2,22 @@ import json
 import os
 from datetime import datetime, timezone
 
+# REPLACE WITH / ADD TO:
 from flask import Flask, jsonify, request
+from flask_cors import CORS  # <-- ADD THIS IMPORT
 import mysql.connector
 from mysql.connector import Error, pooling
 import redis
 
 app = Flask(__name__)
+CORS(app)  # <-- ADD THIS LINE
 
 MYSQL_CONFIG = {
-    "host": os.getenv("MYSQL_HOST", "mysql"),
+    "host": os.getenv("MYSQL_HOST", "localhost"),
     "port": int(os.getenv("MYSQL_PORT", "3306")),
     "database": os.getenv("MYSQL_DB", "PharmaGuard"),
-    "user": os.getenv("MYSQL_USER", "medtrack"),
-    "password": os.getenv("MYSQL_PASSWORD", "medtrack123"),
+    "user": os.getenv("MYSQL_USER", "root"),
+    "password": os.getenv("MYSQL_PASSWORD", "Arya@ig9809"),
 }
 
 MYSQL_POOL_SIZE = int(os.getenv("MYSQL_POOL_SIZE", "10"))
@@ -67,6 +70,8 @@ def _cache_key(qr_hash: str) -> str:
 
 
 def _read_cache(qr_hash: str) -> dict | None:
+    if not redis_client:        # <-- ADD THIS CHECK
+        return None             # <-- ADD THIS CHECK
     raw = redis_client.get(_cache_key(qr_hash))
     if not raw:
         return None
@@ -75,8 +80,9 @@ def _read_cache(qr_hash: str) -> dict | None:
     except json.JSONDecodeError:
         return None
 
-
 def _write_cache(qr_hash: str, payload: dict, ttl_seconds: int | None = None) -> None:
+    if not redis_client:        # <-- ADD THIS CHECK
+        return                  # <-- ADD THIS CHECK
     ttl = ttl_seconds if ttl_seconds is not None else CACHE_TTL_SECONDS
     redis_client.setex(_cache_key(qr_hash), ttl, json.dumps(payload))
 
@@ -309,6 +315,165 @@ def scan_batch() -> tuple:
         if conn:
             conn.close()
 
+@app.post("/api/process_sale")
+def api_process_sale() -> tuple:
+    payload = request.get_json(silent=True) or {}
+    
+    # Extract values from the request payload
+    pharmacy_id = payload.get("pharmacy_id")
+    batch_id = payload.get("batch_id")
+    quantity = payload.get("quantity")
+    duration = payload.get("treatment_duration_days")
+    reason = payload.get("override_reason")
+
+    conn = None
+    cur = None
+    try:
+        conn = mysql_pool.get_connection()
+        conn.start_transaction()
+        cur = conn.cursor()
+        
+        # Call the PROCESS_SALE stored procedure from 03_procedure.sql
+        cur.callproc("PROCESS_SALE", [pharmacy_id, batch_id, quantity, duration, reason])
+        
+        conn.commit()
+        return jsonify({"allowed": True, "status": "Success", "message": "Sale committed and inventory updated"}), 200
+        
+    except Error as exc:
+        if conn:
+            conn.rollback()
+        return jsonify({"allowed": False, "status": "Rejected", "error": str(exc)}), 403
+        
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+@app.post("/api/traceback")
+def api_traceback() -> tuple:
+    payload = request.get_json(silent=True) or {}
+    batch_id = payload.get("batch_id")
+    actor_id = payload.get("actor_id")
+
+    conn = None
+    cur = None
+    try:
+        conn = mysql_pool.get_connection()
+        cur = conn.cursor(dictionary=True)
+        
+        # Call the TraceSupplyChain recursive procedure from recursive.sql
+        cur.callproc("TraceSupplyChain", [batch_id, actor_id])
+        
+        # Fetch the recursive CTE results
+        steps = []
+        for result in cur.stored_results():
+            steps.extend(result.fetchall())
+            
+        return jsonify({"status": "Success", "steps": steps}), 200
+        
+    except Error as exc:
+        return jsonify({"status": "Error", "error": str(exc)}), 400
+        
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+@app.get("/api/track/<batch_code>")
+def track_batch(batch_code):
+    # Clean the input (e.g., turn "B-4821" or "#B-4821" into just "4821")
+    clean_id = ''.join(filter(str.isdigit, batch_code))
+    if not clean_id:
+        return jsonify({"error": "Invalid batch code format"}), 400
+
+    conn = None
+    cur = None
+    try:
+        conn = mysql_pool.get_connection()
+        cur = conn.cursor(dictionary=True)
+        
+        # Fetch the details the Flutter app expects
+        query = """
+            SELECT 
+                b.batch_id,
+                b.qr_code_hash,
+                b.mfg_date,
+                b.expiry_date,
+                m.generic_name,
+                m.brand_name,
+                a.username as owner_name,
+                a.role_type
+            FROM BATCH b
+            JOIN MEDICINE m ON b.medicine_id = m.medicine_id
+            JOIN ACTOR a ON b.current_owner_id = a.actor_id
+            WHERE b.batch_id = %s
+        """
+        cur.execute(query, (int(clean_id),))
+        result = cur.fetchone()
+
+        if not result:
+            return jsonify({"error": "Batch not found"}), 404
+
+        # Format the response exactly how customer_page.dart expects it
+        response_data = {
+            'name': f"{result['generic_name']} ({result['brand_name']})",
+            'manufacturer': "MediCorp Ltd." if result['role_type'] != 'Manufacturer' else result['owner_name'],
+            'pharmacy': result['owner_name'] if result['role_type'] == 'Pharmacy' else "In-Transit",
+            'batchCode': f"B-{result['batch_id']}",
+            'status': 'Verified Safe' if result['expiry_date'] >= datetime.now().date() else 'Expired/Warning',
+            'manufacturedDate': result['mfg_date'].strftime('%Y-%m-%d'),
+            'expiryDate': result['expiry_date'].strftime('%Y-%m-%d'),
+        }
+
+        return jsonify(response_data), 200
+
+    except Error as exc:
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
+@app.post("/api/login")
+def login_user():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({"status": "error", "message": "Missing credentials"}), 400
+
+    conn = None
+    cur = None
+    try:
+        conn = mysql_pool.get_connection()
+        cur = conn.cursor(dictionary=True)
+        
+        # Query the ACTOR table to check credentials
+        query = """
+            SELECT actor_id, username, role_type 
+            FROM ACTOR 
+            WHERE username = %s AND password_hash = %s
+        """
+        cur.execute(query, (username, password))
+        user = cur.fetchone()
+
+        if user:
+            return jsonify({
+                "status": "success", 
+                "actor_id": user['actor_id'],
+                "username": user['username'],
+                "role": user['role_type'] 
+            }), 200
+        else:
+            return jsonify({"status": "error", "message": "Invalid username or password"}), 401
+
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

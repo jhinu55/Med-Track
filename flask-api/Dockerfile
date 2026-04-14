@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 COPY seed.py .
+COPY routes/ routes/
 
 EXPOSE 5000
 
